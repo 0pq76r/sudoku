@@ -1,13 +1,16 @@
 use std::io;
+use std::thread;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::convert::TryFrom;
 
 const SUDOKU_SIZE :usize = 9;
 const SUDOKU_BLOCKS :usize = 3;
+type Sudoku = [[u8; SUDOKU_SIZE]; SUDOKU_SIZE];
+type SudokuInp = [[[bool; SUDOKU_SIZE]; SUDOKU_SIZE];SUDOKU_SIZE];
 
-fn read_input() -> [[u8; SUDOKU_SIZE]; SUDOKU_SIZE] {
-    let mut sudoku = [[0 as u8; SUDOKU_SIZE]; SUDOKU_SIZE];
+fn read_input() -> Sudoku {
+    let mut sudoku:Sudoku = [[0; SUDOKU_SIZE];SUDOKU_SIZE];
     for i in 0..SUDOKU_SIZE {
         let mut input = String::new();
         match io::stdin().read_line(&mut input){
@@ -26,8 +29,8 @@ fn read_input() -> [[u8; SUDOKU_SIZE]; SUDOKU_SIZE] {
     sudoku
 }
 
-fn prep_inputs(sudoku : &[[u8; SUDOKU_SIZE]; SUDOKU_SIZE])
-               -> [[[bool; SUDOKU_SIZE]; SUDOKU_SIZE];SUDOKU_SIZE] {
+fn prep_inputs(sudoku : &Sudoku)
+               -> SudokuInp {
     let mut input = [[[true; SUDOKU_SIZE]; SUDOKU_SIZE]; SUDOKU_SIZE];
     for (i, row) in sudoku.iter().enumerate(){
         for (j, col) in row.iter().enumerate(){
@@ -40,16 +43,17 @@ fn prep_inputs(sudoku : &[[u8; SUDOKU_SIZE]; SUDOKU_SIZE])
     input
 }
 
+type Constraint =(HashMap<[bool;SUDOKU_SIZE], bool>, usize);
 trait ConstraintPropagation {
-    fn fwd(&self, cur:&[bool]) -> (HashMap<[bool;SUDOKU_SIZE], bool>, usize);
-    fn bwd(&self, cur:&[bool]) -> (HashMap<[bool;SUDOKU_SIZE], bool>, usize);
-    fn out(&self, post:&(HashMap<[bool;SUDOKU_SIZE], bool>, usize)) -> [bool;SUDOKU_SIZE];
+    fn fwd(&self, cur:&[bool]) -> Constraint;
+    fn bwd(&self, cur:&[bool]) -> Constraint;
+    fn out(&self, post:&Constraint) -> [bool;SUDOKU_SIZE];
 }
 
-impl ConstraintPropagation for (HashMap<[bool;SUDOKU_SIZE], bool>, usize)
+impl ConstraintPropagation for Constraint
 {
     fn fwd(&self, cur:&[bool])
-           -> (HashMap<[bool;SUDOKU_SIZE], bool>, usize)
+           -> Constraint
     {
         let mut post = HashMap::new();
         for (k,v) in self.0.iter() {
@@ -57,16 +61,14 @@ impl ConstraintPropagation for (HashMap<[bool;SUDOKU_SIZE], bool>, usize)
                 if !k[i] && *v && cur[i] {
                     let mut l=k.clone();
                     l[i]=true;
-                    if let Some(b) = &post.insert(l, *v && cur[i]) {
-                        post.insert(l, (*v && cur[i]) || *b); // <- binary max product
-                    }
+                    post.insert(l, true);
                 }
             }
         }
         (post, self.1+1)
     }
     fn bwd(&self, cur:&[bool])
-           -> (HashMap<[bool;SUDOKU_SIZE], bool>, usize)
+           -> Constraint
     {
         let mut pre = HashMap::new();
         for (k,v) in self.0.iter() {
@@ -74,15 +76,13 @@ impl ConstraintPropagation for (HashMap<[bool;SUDOKU_SIZE], bool>, usize)
                 if k[i] && *v && cur[i] {
                     let mut l=k.clone();
                     l[i]=false;
-                    if let Some(b) = &pre.insert(l, *v && cur[i]) {
-                        pre.insert(l, (*v && cur[i]) || *b); // <- binary max product
-                    }
+                    pre.insert(l, true);
                 }
             }
         }
         (pre, self.1-1)
     }
-    fn out(&self, post:&(HashMap<[bool;SUDOKU_SIZE], bool>, usize))
+    fn out(&self, post:&Constraint)
            -> [bool; SUDOKU_SIZE]
     {
         let mut out = [false;SUDOKU_SIZE];
@@ -102,7 +102,7 @@ impl ConstraintPropagation for (HashMap<[bool;SUDOKU_SIZE], bool>, usize)
 fn check_constraints(inp : &[[bool; SUDOKU_SIZE]; SUDOKU_SIZE])
                      -> [[bool; SUDOKU_SIZE]; SUDOKU_SIZE]
 {
-    let mut s_f : Vec<(HashMap<[bool;SUDOKU_SIZE], bool>, usize)>
+    let mut s_f : Vec<Constraint>
         = vec![(HashMap::new(), 0); SUDOKU_SIZE+1];
     s_f[0].0.insert([false;SUDOKU_SIZE],true);
     s_f[SUDOKU_SIZE].1 = SUDOKU_SIZE;
@@ -146,89 +146,151 @@ fn check_constraints(inp : &[[bool; SUDOKU_SIZE]; SUDOKU_SIZE])
     ret
 }
 
-fn main() {
-    let mut sudoku = read_input();
-    let mut inputs_f = prep_inputs(&sudoku);
+fn check_row_constraints(inputs: &SudokuInp) -> SudokuInp {
+    let mut inputs_row = [[[false; SUDOKU_SIZE]; SUDOKU_SIZE];SUDOKU_SIZE];
+    for i in  0..SUDOKU_SIZE {
+        inputs_row[i] = check_constraints(&inputs[i]);
+    }
+    inputs_row
+}
+
+fn check_col_constraints(inputs: &SudokuInp) -> SudokuInp {
+    let mut inputs_col = [[[false; SUDOKU_SIZE]; SUDOKU_SIZE];SUDOKU_SIZE];
+    // col
+    for i in  0..SUDOKU_SIZE {
+        let mut inp = [[false; SUDOKU_SIZE]; SUDOKU_SIZE];
+        for (c,_v) in inputs.iter().enumerate() {
+            inp[c] = inputs[c][i];
+        }
+        let inp_col = check_constraints(&inp);
+        for (c,v) in inp_col.iter().enumerate() {
+            inputs_col[c][i] = *v;
+        }
+    }
+    inputs_col
+}
+
+fn check_block_constraints(inputs: &SudokuInp) -> SudokuInp {
+    let mut inputs_block = [[[false; SUDOKU_SIZE]; SUDOKU_SIZE];SUDOKU_SIZE];
+    for i in (0..SUDOKU_SIZE).collect::<Vec<usize>>().chunks(SUDOKU_BLOCKS){
+        for j in (0..SUDOKU_SIZE).collect::<Vec<usize>>().chunks(SUDOKU_BLOCKS){
+            let mut inp = [[false; SUDOKU_SIZE]; SUDOKU_SIZE];
+            let mut c = 0;
+            for k in i {
+                for l in j {
+                    inp[c] = inputs[*k][*l];
+                    c+=1;
+                }
+            }
+            let inp_blk = check_constraints(&inp);
+            let mut c = 0;
+            for k in i {
+                for l in j {
+                    inputs_block[*k][*l] = inp_blk[c];
+                    c+=1;
+                }
+            }
+        }
+    }
+    inputs_block
+}
+
+fn solve_sudoku_constraints_only(sud: &Sudoku) -> (Result<(bool, (usize,usize,Vec<u8>)),&'static str>,Sudoku) {
+    let mut sudoku = sud.clone();
+    let mut inputs = prep_inputs(&sudoku);
     let mut ambig = 0;
+
+    //DEBUG
     let mut count = 0;
 
     loop {
+        //DEBUG
         count += 1;
-        println!("{}-------------------------",count);
+        println!(" [ {} ] --------------------",count);
         for i in  0..SUDOKU_SIZE {
             println!("{:?}", sudoku[i]);
         }
         println!("---------------------------");
 
-        let mut inputs_row = [[[false; SUDOKU_SIZE]; SUDOKU_SIZE];SUDOKU_SIZE];
-        let mut inputs_col = [[[false; SUDOKU_SIZE]; SUDOKU_SIZE];SUDOKU_SIZE];
-        let mut inputs_block = [[[false; SUDOKU_SIZE]; SUDOKU_SIZE];SUDOKU_SIZE];
+        let row_thread = thread::spawn(move || {check_row_constraints(&inputs)});
+        let col_thread = thread::spawn(move || {check_col_constraints(&inputs)});
+        let block_thread = thread::spawn(move || {check_block_constraints(&inputs)});
+        let inputs_row = row_thread.join().unwrap();
+        let inputs_col = col_thread.join().unwrap();
+        let inputs_block = block_thread.join().unwrap();
 
-        // row
-        for i in  0..SUDOKU_SIZE {
-            inputs_row[i] = check_constraints(&inputs_f[i]);
-        }
 
-        // col
-        for i in  0..SUDOKU_SIZE {
-            let mut inp = [[false; SUDOKU_SIZE]; SUDOKU_SIZE];
-            for (c,_v) in inputs_f.iter().enumerate() {
-                inp[c] = inputs_f[c][i];
-            }
-            let inp_col = check_constraints(&inp);
-            for (c,v) in inp_col.iter().enumerate() {
-                inputs_col[c][i] = *v;
-            }
-        }
-
-        // block
-        for i in (0..SUDOKU_SIZE).collect::<Vec<usize>>().chunks(SUDOKU_BLOCKS){
-            for j in (0..SUDOKU_SIZE).collect::<Vec<usize>>().chunks(SUDOKU_BLOCKS){
-                let mut inp = [[false; SUDOKU_SIZE]; SUDOKU_SIZE];
-                let mut c = 0;
-                for k in i {
-                    for l in j {
-                        inp[c] = inputs_f[*k][*l];
-                        c+=1;
-                    }
-                }
-                let inp_blk = check_constraints(&inp);
-                let mut c = 0;
-                for k in i {
-                    for l in j {
-                        inputs_block[*k][*l] = inp_blk[c];
-                        c+=1;
-                    }
-                }
-            }
-        }
         for i in  0..SUDOKU_SIZE {
             for j in  0..SUDOKU_SIZE {
                 for k in  0..SUDOKU_SIZE {
-                    inputs_f[i][j][k] = inputs_block[i][j][k] && inputs_col[i][j][k] && inputs_row[i][j][k];
+                    inputs[i][j][k] = inputs_block[i][j][k] && inputs_col[i][j][k] && inputs_row[i][j][k];
                 }
             }
         }
+
         let mut curambig = 0;
         for i in  0..SUDOKU_SIZE {
             for j in  0..SUDOKU_SIZE {
-                let nums = inputs_f[i][j].iter().enumerate()
+                let nums = inputs[i][j].iter().enumerate()
                     .filter(|(_c,v)|**v)
                     .map(|x|x.0+1).collect::<Vec<usize>>();
                 match nums.len().cmp(&1) {
-                    Ordering::Less => {panic!("Unsolvable")}
-                    Ordering::Equal => {sudoku[i][j] = u8::try_from(nums[0]).expect("Internal error")}
+                    Ordering::Less => {return (Err("Unsolvable"), sudoku)}
+                    Ordering::Equal => {sudoku[i][j] = u8::try_from(nums[0]).unwrap()}
                     Ordering::Greater => {curambig += 1;}
                 }
             }
         }
-        if curambig == 0 || curambig == ambig {
+        if curambig == 0 {
             break;
+        }
+        if curambig == ambig {
+            for i in  0..SUDOKU_SIZE {
+                for j in  0..SUDOKU_SIZE {
+                    let nums = inputs[i][j].iter().enumerate()
+                        .filter(|(_c,v)|**v)
+                        .map(|x|u8::try_from(x.0).unwrap()+1).collect::<Vec<u8>>();
+                    if nums.len() > 1
+                    {
+                        return (Ok((false,(i,j,nums))), sudoku);
+                    }
+                }
+            }
         }
         ambig = curambig;
     }
-    for i in  0..SUDOKU_SIZE {
-        println!("{:?}", sudoku[i]);
-    }
+    return (Ok((true,(0,0,vec![]))), sudoku);
+}
 
+fn solve_sudoku(su:&Sudoku) -> Result<Sudoku,&'static str> {
+    let s = solve_sudoku_constraints_only(su);
+    match s.0 {
+        Err(e) => return Err(e),
+        Ok(b) => {
+            if !b.0 {
+                for i in &(b.1).2 {
+                    let mut sudoku = su.clone();
+                    sudoku[(b.1).0][(b.1).1] = *i;
+                    if let Ok(b) = solve_sudoku(&sudoku) {
+                        return Ok(b);
+                    }
+                    println!("--- NEXT ---");
+                }
+                return Err("Unable to find soluiton");
+            }
+        }
+    }
+    Ok(s.1)
+}
+
+fn main() {
+    let sudoku = read_input();
+    let s = solve_sudoku(&sudoku).unwrap();
+
+    for i in  0..SUDOKU_SIZE {
+        for j in  0..SUDOKU_SIZE {
+            print!("{}", s[i][j]);
+        }
+        println!("");
+    }
 }
